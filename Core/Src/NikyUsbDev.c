@@ -1,39 +1,38 @@
 #include "NikyUsbDev.h"
 
 //#include "usbd_conf.h"
-/*
-#include "stm32f4xx_hal.h"
-#include "stm32f4xx_ll_adc.h"
-#include "stm32f4xx_ll_dma.h"
-#include "stm32f4xx_ll_rcc.h"
-#include "stm32f4xx_ll_bus.h"
-#include "stm32f4xx_ll_system.h"
-#include "stm32f4xx_ll_exti.h"
-#include "stm32f4xx_ll_cortex.h"
-#include "stm32f4xx_ll_utils.h"
-#include "stm32f4xx_ll_pwr.h"
-#include "stm32f4xx_hal.h"
-//#include "stm32f4xx_ll_spi.h"
-#include "stm32f4xx_ll_tim.h"
-#include "stm32f4xx_ll_usart.h"
-#include "stm32f4xx_ll_gpio.h"
-*/
-
 //#include "usbd_def.h"
+
+#include <assert.h> // ради static_assert
+
+#define NDBG 0   // 1 для отладки обмена usb через ком-порт
+
 
 #if IsMidiUsbEn == 1
 #include "NikyUsbDecMidi.h"
 #endif
 
-#define NDBG 0
-
 #define __ToCCMRAM // __attribute__((section (".ccmram")))
+
 
 extern PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
-void Usart_Out(uint8_t value); // только ради отладки
-void Usart_Out16(uint16_t value);
-void Usart_Out32(uint32_t value);
+static void Usart_Out(uint8_t value)  // только ради отладки обмена
+{
+  //while (!LL_USART_IsActiveFlag_TXE(USART2)) ;  // Check if the USART Transmit Data Register Empty Flag is set
+  //LL_USART_TransmitData8(USART2, value);
+};
+
+static void Usart_Out16(uint16_t value)
+{
+	Usart_Out(value);
+	Usart_Out(value>>8);
+};
+/*static void Usart_Out32(uint32_t value)
+{
+	Usart_Out16(value);
+	Usart_Out16(value>>16);
+};*/
 
 volatile uint8_t m_UsbCmdBuf[64]  __ALIGNED(4);     // принятая команда от компа на EP1_OUT
 volatile uint8_t m_UsbCmdRetBuf[256] __ALIGNED(4);  // и буфер ответа для отправки в комп через EP1_IN
@@ -42,6 +41,7 @@ static uint8_t m_UsbMidiRcvBuf[64]  __ALIGNED(4);   // буфер приёма �
 
 uint8_t volatile NikyUsbDebug_GetUrlN = 0;
 uint8_t volatile NikyUsbDebug_GetBOSDescriptorN = 0;
+uint8_t volatile NikyUsbDebug_Get_MS_OS_20_Descriptor_N = 0;
 
 
 
@@ -83,7 +83,7 @@ volatile uint32_t m_UsbMidiOutBuf[256] __ALIGNED(4) __ToCCMRAM ;
 volatile int m_UsbMidiOutBufStatus __ToCCMRAM;
 volatile uint8_t m_UsbMidiOutBufPosSend __ToCCMRAM;
 
-
+static volatile uint8_t g_IsConfigSetAlready __ToCCMRAM;
 
 void MyUsbDevInitGlobal()
 {
@@ -100,6 +100,8 @@ void MyUsbDevInitGlobal()
 	m_UsbMidiOutBufPosWr = 0;
 	m_UsbMidiOutBufStatus = 1;
 	m_UsbMidiOutBufPosSend = 0;
+
+	g_IsConfigSetAlready = 0;
 };
 
 void MyUsbDevStart()
@@ -108,9 +110,14 @@ void MyUsbDevStart()
 
 	  HAL_PCDEx_SetRxFiFo(&hpcd_USB_OTG_FS, 128);   // Пишет прямо в OTG_FS_GRXFSIZ в элементах по 32 бита
 	  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 0, 32); // тоже в словах по 32 бита
+#if IsMidiUsbEn == 1
 	  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 1, 64); // тоже в словах по 32 бита
 	  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 2, 64); // тоже в словах по 32 бита
 	  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 3, 32); // тоже в словах по 32 бита
+#else
+	  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 1, 64);
+	  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 2, 64+32);
+#endif
 
 	  //Usart_Out(0xaa);
 	  HAL_PCD_Start(&hpcd_USB_OTG_FS);  // запуск устр-ва
@@ -119,18 +126,19 @@ void MyUsbDevStart()
 
 
 // см. USB_MAX_EP0_SIZE в usbd_def.h
-#define MAX_EP0_PACKET_SIZE		32 // maximum packet size for low-speed peripherals is 8 bytes, for full-speed peripherals it can be 8, 16, 32, or 64 bytes
-#define	NUM_CONFIGURATIONS	1
+#define MAX_EP0_PACKET_SIZE	32 // maximum packet size for low-speed peripherals is 8 bytes, for full-speed peripherals it can be 8, 16, 32, or 64 bytes
+#define	NUM_CONFIGURATIONS	 1
 
 #if IsMidiUsbEn != 1
-#define	NUM_INTERFACES		1
+#define	NUM_INTERFACES		 1
 #endif
 #if IsMidiUsbEn == 1
-#define	NUM_INTERFACES		3
+#define	NUM_INTERFACES		 3
 #endif
 
 
-void OldHAL_PCD_ResetCallback(PCD_HandleTypeDef *hpcd);
+
+//void OldHAL_PCD_ResetCallback(PCD_HandleTypeDef *hpcd);
 void HAL_PCD_ResetCallback(PCD_HandleTypeDef *hpcd)
 {
 	if (NDBG) Usart_Out(0x10);
@@ -142,15 +150,20 @@ void HAL_PCD_ResetCallback(PCD_HandleTypeDef *hpcd)
 	m_EP1_AutoSendStatus = 0;
 	m_OutUsartBufferStatus = 1; // запрет пытаться слать данные в неготовое устро-во
 	m_UsbMidiOutBufStatus = 1;  // запрет посыла в неготовое устройство
+
+	g_IsConfigSetAlready = 0;   // setconfig ещё не вызывался после сброса
 };
 
 
-// standard descriptor types
+// Standard descriptor types
+//
 #define	DEVICE_DESCRIPTOR_TYPE		    1
 #define	CONFIGURATION_DESCRIPTOR_TYPE	2
 #define	STRING_DESCRIPTOR_TYPE	     	3
 #define	INTERFACE_DESCRIPTOR_TYPE	    4
 #define	ENDPOINT_DESCRIPTOR_TYPE     	5
+#define BOS_DESCRIPTOR_TYPE             (0x0F)
+
 
 static const uint8_t MyDescriptor_Device[] __ALIGNED(4) =
 {
@@ -166,7 +179,6 @@ static const uint8_t MyDescriptor_Device[] __ALIGNED(4) =
 };
 
 #pragma pack(push, 1)
-
 
 typedef struct _USB_CONFIGURATION_DESCRIPTOR
 {
@@ -460,7 +472,7 @@ const uint16_t MyDescriptor_String1_Manufacturer[] =
 
 const uint16_t MyDescriptor_String2_Product[] =
 {
-  2 + 9*2 + 256*STRING_DESCRIPTOR_TYPE,
+  2 + 10*2 + 256*STRING_DESCRIPTOR_TYPE,
   L'N',
   L'i',
   L'k',
@@ -470,11 +482,12 @@ const uint16_t MyDescriptor_String2_Product[] =
   L'3',
   L'k',
   L'V',
+  L'2',
 };
 
-const uint16_t MyDescriptor_String3[] =
+const uint16_t MyDescriptor_String3_Serial[] =
 {
-  2 + 13*2 + 256*STRING_DESCRIPTOR_TYPE,
+  2 + 14*2 + 256*STRING_DESCRIPTOR_TYPE,
   L'N',
   L'i',
   L'k',
@@ -488,6 +501,7 @@ const uint16_t MyDescriptor_String3[] =
   L'3',
   L'k',
   L'V',
+  L'2',
 };
 
 const uint16_t MyDescriptor_String4_NikyProgInterfaceName[] =
@@ -517,17 +531,23 @@ const uint16_t MyDescriptor_String5_NikyMidiInterfaceName[] =
   L'i',
 };
 
-#define BOS_DESCRIPTOR (0x0F)
+#if IsMidiUsbEn == 1
+#define MS_OS_20_LENGTH (0xB2) // 0xB2 - для композитных
+#else
+#define MS_OS_20_LENGTH (0xA2) // 0xA2 - для не композитных
+#endif
 
 const uint8_t MyBOSDescriptor[] =   // BOS (Binary Device Object Store) Descriptor
 {
     // BOS Descriptor
-    0x05,        // bLength
-	BOS_DESCRIPTOR, //0x0F,        // bDescriptorType (BOS)
-    0x1d, 0x00,  // wTotalLength (1d=29=24+5 bytes)
-    0x01,        // bNumDeviceCaps
+    0x05,                // bLength
+	BOS_DESCRIPTOR_TYPE, // bDescriptorType (BOS=0xF)
+    5+24+28, 0,          // wTotalLength = 5+24+28=57=0x39
+	0x02,                // bNumDeviceCaps - число дескрипторов, идущих дальше
 
-    // Device Capability: Platform Descriptor
+	// === Capability 1: WebUSB ===
+
+	// Device Capability: Platform Descriptor
     0x18,        // bLength (24 bytes)
     0x10,        // bDescriptorType (Device Capability)
     0x05,        // bDevCapabilityType (Platform)
@@ -541,8 +561,31 @@ const uint8_t MyBOSDescriptor[] =   // BOS (Binary Device Object Store) Descript
 
     0x00, 0x01,  // bcdVersion (1.0)
     0x01,        // bVendorCode  (используется для запроса URL, подставляется в поле bRequest запроса)
-    0x01         // iLandingPage (индекс URL дескриптора, подставляется в поле wValue запроса)
+    0x01,        // iLandingPage (индекс URL дескриптора, подставляется в поле wValue запроса)
+
+
+	// === Capability 2: Microsoft OS 2.0 ===
+
+	0x1c,        // bLength 0x1c = 28
+	0x10,        // bDescriptorType: Device Capability
+	0x05,        // bDevCapabilityType: Platform
+	0x00,        // bReserved
+
+	// MS OS 2.0 UUID: {D8DD60DF-4589-4CC7-9CD2-659D9E648A9F}
+	0xDF, 0x60, 0xDD, 0xD8,
+	0x89, 0x45, 0xC7, 0x4C,
+	0x9C, 0xD2, 0x65, 0x9D,
+	0x9E, 0x64, 0x8A, 0x9F,
+
+	0, 0, 0x03, 0x06,    // dwWindowsVersion это 6.3 (т.е. Win8.1)
+
+	MS_OS_20_LENGTH, 0,  // wMSOSDescriptorSetTotalLength, см. структуру MS_OS_20_Descriptor_Set
+
+	0x02,                // bMS_VendorCode - bRequest value for retrieving further Microsoft descriptors
+
+	0x00,                // bAltEnumCode - Device does not support alternate enumeration
 };
+
 
 // URL Descriptor для landing page
 const uint8_t MyURL_Descriptor[] = {
@@ -553,13 +596,97 @@ const uint8_t MyURL_Descriptor[] = {
     '/', 'N', 'i', 'k', 'y', 'V', 'V', '3', 'k', 'V', '/', 'U', 'p', 'r'
 };
 
+// Microsoft OS 2.0 Descriptors, Table 9
+//
+#define MS_OS_20_SET_HEADER_DESCRIPTOR 0x00
+#define MS_OS_20_SUBSET_HEADER_CONFIGURATION 0x01
+#define MS_OS_20_SUBSET_HEADER_FUNCTION 0x02
+#define MS_OS_20_FEATURE_COMPATIBLE_ID 0x03
+#define MS_OS_20_FEATURE_REG_PROPERTY 0x04
+//#define MS_OS_20_FEATURE_MIN_RESUME_TIME 0x05
+//#define MS_OS_20_FEATURE_MODEL_ID 0x06
+//#define MS_OS_20_FEATURE_CCGP_DEVICE 0x07
+
+
+const uint8_t MS_OS_20_Descriptor_Set[] =
+{
+    // MS OS 2.0 Descriptor Set Header (10 bytes)
+    0x0A, 0x00,              // wLength: 10
+    0x00, 0x00,              // wDescriptorType: MS_OS_20_SET_HEADER_DESCRIPTOR
+    0x00, 0x00, 0x03, 0x06,  // dwWindowsVersion: Windows 8.1 (6.3)
+	MS_OS_20_LENGTH,  0x00,  // wTotalLength: 0xb2 = 178 байт, см. поле wMSOSDescriptorSetTotalLength в BOS
+
+	// Далее 8 + 8 + 20 + 132 = 168 байт, вместе с началом 178 байт = 0xb2 (композитные устройства, иначе на 16 байт меньше)
+
+// Эти 16 байт идут, только если композитное устройство, иначе размер на 16 байт меньше (MS_OS_20_LENGTH = A2 вместо B2)
+// для не композитных надо убирать, проверено (иначе не работает)
+//
+#if IsMidiUsbEn == 1
+    // Configuration Subset Header (8 bytes)
+    0x08, 0x00,              // wLength: 8
+    0x01, 0x00,              // wDescriptorType: MS_OS_20_SUBSET_HEADER_CONFIGURATION
+    0x00,                    // bConfigurationValue (Applies to configuration 1, indexed from 0 despite configurations normally indexed from 1)
+    0x00,                    // bReserved
+    0xA8, 0x00,              // wSubsetLength: 0xa8=168 bytes (Total length of the subset including this header)
+
+    // Function Subset Header (8 bytes)
+    0x08, 0x00,              // wLength: 8
+    0x02, 0x00,              // wDescriptorType: MS_OS_20_SUBSET_HEADER_FUNCTION
+    0x00,                    // bFirstInterface: 0 (важно для композитных)
+    0x00,                    // bReserved
+    0xA0, 0x00,              // wSubsetLength: A0 = 160 байт
+#endif
+
+
+    // Compatible ID Descriptor (20 bytes)
+    0x14, 0x00,              // wLength: 20
+    0x03, 0x00,              // wDescriptorType: MS_OS_20_FEATURE_COMPATIBLE_ID
+    'W', 'I', 'N', 'U', 'S', 'B', 0x00, 0x00,  // WINUSB
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // Padding
+
+    // Registry Property Descriptor (132 bytes)
+    0x84, 0x00,              // wLength: 0x84 = 132, 6 + 2+42 + 2+80 = 132 байта
+    0x04, 0x00,              // wDescriptorType: MS_OS_20_FEATURE_REG_PROPERTY
+    0x07, 0x00,              // wPropertyDataType: REG_MULTI_SZ
+
+    // Property Name: "DeviceInterfaceGUIDs" (42 bytes)
+    0x2A, 0x00,              // wPropertyNameLength: 0x2a = 42 (не включая само это поле размера)
+    'D',0, 'e',0, 'v',0, 'i',0, 'c',0, 'e',0,                          // "DeviceInterfaceGUIDs\0", 21*2 = 42 байта = 0x2a
+	'I',0, 'n',0, 't',0, 'e',0, 'r',0, 'f',0, 'a',0,  'c',0,  'e',0,
+	'G',0, 'U',0, 'I',0, 'D',0, 's',0,
+    0, 0,
+
+	// Мой любимый {C3DA790D-889F-470A-88C6-B1B3D1471ADE}  это 38 символов, 76 = 0x4c байт.
+
+	// Property Data: GUID (80 bytes)
+	0x50, 0x00,              // wPropertyDataLength: 80 (не включая само это поле размера)
+	'{', 0,
+	'C', 0, '3', 0, 'D', 0, 'A', 0,
+	'7', 0, '9', 0, '0', 0, 'D', 0,
+	'-', 0,
+	'8', 0, '8', 0, '9', 0, 'F', 0,
+	'-', 0,
+	'4', 0, '7', 0, '0', 0, 'A', 0,
+	'-', 0,
+	'8', 0, '8', 0, 'C', 0, '6', 0,
+	'-', 0,
+	'B', 0, '1', 0, 'B', 0, '3', 0,
+	'D', 0, '1', 0, '4', 0, '7', 0,
+	'1', 0, 'A', 0, 'D', 0, 'E', 0,
+	'}', 0,
+	0, 0, 0, 0  // '\0\0'
+
+};
+
+static_assert(sizeof(MS_OS_20_Descriptor_Set) == MS_OS_20_LENGTH, "sizeof(MS_OS_20_Descriptor_Set) != MS_OS_20_LENGTH");
+
 
 const uint8_t * Mon_GetUsbSNDesc();  // выдаёт указатель на usb дескриптор строки с серийником
 
 
 static int NikyUsbStatus = 0;
 static const uint8_t * NikyUsbSetupTxP = NULL;  // буфер передачи ответа на TxSetup через IN_EP0
-static int NikyUsbSetupTxSz = 0;          // и длина ответа
+static int NikyUsbSetupTxSz = 0;                // и длина ответа
 
 typedef  struct
 {
@@ -584,6 +711,13 @@ void ProcessSetupToken_SetAddr(PCD_HandleTypeDef *hpcd, TNikyUSBSetupRequest * p
 
 void ProcessSetupToken_SetConfig(PCD_HandleTypeDef *hpcd, TNikyUSBSetupRequest * pSetup)
 {
+	if (g_IsConfigSetAlready)
+	{
+		// второй раз вызывают после сброса (любит линукс), а у меня на это не очень-то и рассчитано
+		goto LLL_Skip_Opens;
+	};
+
+	g_IsConfigSetAlready = 1;
 	HAL_PCD_EP_Open(hpcd, 0x01, 64, EP_TYPE_BULK);  // OUT EP1
 	HAL_PCD_EP_Open(hpcd, 0x81, 64, EP_TYPE_BULK);  // IN  EP1
 
@@ -594,7 +728,7 @@ void ProcessSetupToken_SetConfig(PCD_HandleTypeDef *hpcd, TNikyUSBSetupRequest *
 	HAL_PCD_EP_Open(hpcd, 0x83, 64, EP_TYPE_BULK);  // IN  EP3 midi
 #endif
 
-	// настроить EP1_OUT на приём команд от компа
+	// настроить EP1_OUT на приём моих команд от компа
 	HAL_PCD_EP_Receive(&hpcd_USB_OTG_FS, 0x1, (uint8_t *) m_UsbCmdBuf, sizeof(m_UsbCmdBuf));
 
 #if IsMidiUsbEn == 1
@@ -607,6 +741,8 @@ void ProcessSetupToken_SetConfig(PCD_HandleTypeDef *hpcd, TNikyUSBSetupRequest *
 #if IsMidiUsbEn == 1
 	m_UsbMidiOutBufStatus = 0;
 #endif
+
+LLL_Skip_Opens:
 
 	m_OutUsartBufferPosSend = m_OutUsartBufferPosWr;
 	m_UsbMidiOutBufPosSend = m_UsbMidiOutBufPosWr;
@@ -625,7 +761,7 @@ void ProcessSetupToken_MyToProgMode(PCD_HandleTypeDef *hpcd, TNikyUSBSetupReques
 
 uint8_t ProcessSetupToken_ClearFeatureEP(PCD_HandleTypeDef *hpcd, TNikyUSBSetupRequest * pSetup)
 {
-	if (pSetup->Value == 0) // Value=0 - свойство Halt, в Index номер EP
+	if (pSetup->Value == 0) // Value = 0 - свойство Halt, в Index номер EP
 	{
 	   //AddDebugEP2(3, pSetup->Index);
 	   HAL_PCD_EP_ClrStall(hpcd, pSetup->Index); // 2025 попытка добавить содержительное действие
@@ -644,6 +780,22 @@ uint8_t ProcessSetupToken_SetFeatureEP(PCD_HandleTypeDef *hpcd, TNikyUSBSetupReq
 	};
 	return 0;
 };
+
+uint8_t ProcessSetupToken_SetClrFeatureDevice(PCD_HandleTypeDef *hpcd, TNikyUSBSetupRequest * pSetup, uint8_t IsSet)
+{
+    if (pSetup->Value == 1) // wValue == Feature Selector - DEVICE_REMOTE_WAKEUP = 0x01
+    {
+    	if (!IsSet) // сброс свойства DEVICE_REMOTE_WAKEUP я подтверждаю
+    	{
+    	  ProcessSetup_SendEnd(hpcd);
+    	  return 1; // обработано
+    	};
+    	return 0; // отвергаю установку DEVICE_REMOTE_WAKEUP
+    };
+	return 0;
+};
+
+
 
 void SetupOutOtvetProc(int IsFirst)
 {
@@ -687,31 +839,30 @@ void ProcessSetupToken_GetDescriptor(PCD_HandleTypeDef *hpcd, TNikyUSBSetupReque
 	int len = 0;
 	if (pSetup->Value == 0x100)  // GetDesc_Device
 	{
-      p = (uint8_t *) &MyDescriptor_Device;
-      len = sizeof(MyDescriptor_Device);
+       p = (uint8_t *) &MyDescriptor_Device;
+       len = sizeof(MyDescriptor_Device);
 	};
 	if (pSetup->Value == 0x200)  // GetDesc_Config
 	{
-		p = (uint8_t *) &NikyDevCfg1;
-		len = sizeof(NikyDevCfg1);
-		//USBD_HandleTypeDef * pdev = (USBD_HandleTypeDef*)hpcd->pData;
-		//uint16_t len16;
-		//p = pdev->pDesc->GetConfigurationStrDescriptor(pdev->dev_speed, &len16);
-		//len = len16;
+	   p = (uint8_t *) &NikyDevCfg1;
+	   len = sizeof(NikyDevCfg1);
 	};
 
-	if ((pSetup->Value>>8) == BOS_DESCRIPTOR)  // BOSDescriptor;
+	if ((pSetup->Value>>8) == BOS_DESCRIPTOR_TYPE)  // BOSDescriptor;
 	{
 	   NikyUsbDebug_GetBOSDescriptorN++;
 	   p = (uint8_t *) &MyBOSDescriptor;
   	   len = sizeof(MyBOSDescriptor);
 	};
 
-	if ((pSetup->Value>>8) == 0x3)  // GetDesc_String
+	if ((pSetup->Value>>8) == STRING_DESCRIPTOR_TYPE)  // GetDesc_String
 	{
        uint8_t is = (uint8_t) pSetup->Value;
-       p = (uint8_t *) &MyDescriptor_String0;
-       len = sizeof(MyDescriptor_String0);
+       if (is == 0)
+       {
+    	  p = (uint8_t *) &MyDescriptor_String0;
+          len = sizeof(MyDescriptor_String0);
+       };
        if (is == 1)
        {
      	 p = (uint8_t *) &MyDescriptor_String1_Manufacturer;
@@ -729,7 +880,7 @@ void ProcessSetupToken_GetDescriptor(PCD_HandleTypeDef *hpcd, TNikyUSBSetupReque
          {
              p = (uint8_t *) &MyDescriptor_String3;
          };*/
-         p = (uint8_t *) &MyDescriptor_String3;
+         p = (uint8_t *) &MyDescriptor_String3_Serial;
          len = (uint8_t) (*p);
        };
        if (is == 4)
@@ -746,30 +897,89 @@ void ProcessSetupToken_GetDescriptor(PCD_HandleTypeDef *hpcd, TNikyUSBSetupReque
 
 	if (!p)
 	{
+		if (NDBG) Usart_Out(0xad);
 		HAL_PCD_EP_SetStall(hpcd, pSetup->RequestType & 0x80);  // RequestType.D7=1 - device to host (IN ENDPOINT)
 		return;
 	};
 
 	if (len > pSetup->Length) len = pSetup->Length;
 
-		//USBD_CtlSendData((USBD_HandleTypeDef *)(hpcd->pData), p, len);
-
 	NikyUsbSetupTxP = p;      // буфер передачи ответа на TxSetup через IN_EP0
 	NikyUsbSetupTxSz = len;   // и длина ответа
 	NikyUsbStatus = 1;
-
-	//HAL_PCD_EP_Transmit(hpcd, 0, p, len);
-
-
 	SetupOutOtvetProc(1);
+};
+
+
+uint8_t ProcessSetupToken_GetVendorDeviceDescriptor(PCD_HandleTypeDef *hpcd, TNikyUSBSetupRequest * pSetup)
+{
+  // bRequest = bVendorCode из BOS для WebUsb, wValue = iLandingPage из BOS, Index = 2 (get_url)
+  //
+  if (pSetup->Request == 0x01 && pSetup->Index == 2 && pSetup->Value == 1)  // GET_URL (0x02)
+  {
+    NikyUsbDebug_GetUrlN++;
+    uint8_t * p = (uint8_t *) &MyURL_Descriptor;
+    int len = sizeof(MyURL_Descriptor);
+    if (len > pSetup->Length) len = pSetup->Length;
+    NikyUsbSetupTxP = p;      // буфер передачи ответа на TxSetup через IN_EP0
+    NikyUsbSetupTxSz = len;   // и длина ответа
+    NikyUsbStatus = 1;
+    SetupOutOtvetProc(1);
+    return 1;
+  };
+
+  // bRequest=bMS_VendorCode из BOS часть 2, wValue=0, wIndex=MS_OS_20_DESCRIPTOR_INDEX=7 (retrieve Microsoft OS 2.0 Descriptor Set)
+  //
+  if (pSetup->Request == 0x2 && pSetup->Index == 7 && pSetup->Value == 0)
+  {
+	NikyUsbDebug_Get_MS_OS_20_Descriptor_N++;
+	uint8_t * p = (uint8_t *) &MS_OS_20_Descriptor_Set;
+    int len = sizeof(MS_OS_20_Descriptor_Set);
+    if (len > pSetup->Length) len = pSetup->Length;
+    NikyUsbSetupTxP = p;      // буфер передачи ответа на TxSetup через IN_EP0
+    NikyUsbSetupTxSz = len;   // и длина ответа
+    NikyUsbStatus = 1;
+    SetupOutOtvetProc(1);
+    return 1;
+  };
+
+  return 0;
+};
+
+uint8_t ProcessSetupToken_GetStatus(PCD_HandleTypeDef *hpcd, TNikyUSBSetupRequest * pSetup)
+{
+	if (pSetup->RequestType == 0x80) // GET_STATUS для устройства
+	{
+      static uint16_t ret = 0x1; // D0-self-powered, D1-Remote Wakeup
+      uint8_t * p = (uint8_t *) &ret;
+      int len = 2;
+      if (len > pSetup->Length) len = pSetup->Length;
+      NikyUsbSetupTxP = p;      // буфер передачи ответа на TxSetup через IN_EP0
+      NikyUsbSetupTxSz = len;   // и длина ответа
+      NikyUsbStatus = 1;
+      SetupOutOtvetProc(1);
+      return 1;
+	};
+	if (pSetup->RequestType == 0x81 || pSetup->RequestType == 0x82) // GET_STATUS для интерфейса или EP
+	{
+      static uint16_t ret = 0x0; // всё зарезервировано или сообщить halt
+      uint8_t * p = (uint8_t *) &ret;
+      int len = 2;
+      if (len > pSetup->Length) len = pSetup->Length;
+      NikyUsbSetupTxP = p;      // буфер передачи ответа на TxSetup через IN_EP0
+      NikyUsbSetupTxSz = len;   // и длина ответа
+      NikyUsbStatus = 1;
+      SetupOutOtvetProc(1);
+      return 1;
+	};
+	return 0;
 };
 
 
 
 
 
-
-void OldHAL_PCD_SetupStageCallback(PCD_HandleTypeDef *hpcd);
+//void OldHAL_PCD_SetupStageCallback(PCD_HandleTypeDef *hpcd);
 void HAL_PCD_SetupStageCallback(PCD_HandleTypeDef *hpcd)
 {
 	// Вызвана из недр HAL_PCD_IRQHandler с заполненным hpcd->Setup
@@ -787,34 +997,8 @@ void HAL_PCD_SetupStageCallback(PCD_HandleTypeDef *hpcd)
 
 	NikyUsbStatus = 0;
 
-	/*if (pSetup->RequestType == 0x80 && pSetup->Request == 6 && pSetup->Value == 0x100) // dev
-	{
-	  ProcessSetupToken_GetDescriptor(hpcd, pSetup);
-	  return;
-	};
-
-
-
-	if (pSetup->RequestType == 0x80 && pSetup->Request == 6 && (pSetup->Value>>8) == 0x3) // строковый дескриптор
-	{
-	  ProcessSetupToken_GetDescriptor(hpcd, pSetup);
-	  return;
-	};
-
-
-	if (pSetup->RequestType == 0x80 && pSetup->Request == 6 && pSetup->Value == 0x200)  // GetDesc_Config
-	{
-		ProcessSetupToken_GetDescriptor(hpcd, pSetup);
-	    return;
-	};
-	if (pSetup->RequestType == 0 && pSetup->Request == 9)
-	{
-		ProcessSetupToken_SetConfig(hpcd, pSetup); return;
-	}; */
-
-
-    //*
-	// RequestType.D7 Data direction (0 - Host-to-device), D6:5 - тип (0-Standard, 1-class, 2-vendor), D4:D0 - Recipient (0-device,1-interface,2-endpoint)
+	// RequestType.D7 Data direction (0 - Host-to-device), D6:5 - тип запроса (0-Standard, 1-class, 2-vendor),
+	// D4:D0 - Recipient кому запрос (0-device, 1-interface, 2-endpoint)
 
 	if (pSetup->RequestType == 0 && pSetup->Request == 5)
 	{
@@ -826,8 +1010,6 @@ void HAL_PCD_SetupStageCallback(PCD_HandleTypeDef *hpcd)
 		ProcessSetupToken_GetDescriptor(hpcd, pSetup); return;
 	};
 
-
-
 	if (pSetup->RequestType == 0 && pSetup->Request == 9)
 	{
 	   ProcessSetupToken_SetConfig(hpcd, pSetup); return;
@@ -838,40 +1020,41 @@ void HAL_PCD_SetupStageCallback(PCD_HandleTypeDef *hpcd)
 	   ProcessSetupToken_MyToProgMode(hpcd, pSetup); return;
 	};
 
-	if (pSetup->RequestType == 0x2 && pSetup->Request == 0x01)  // EP ClearFeature (очистка признака остановки)
+	if (pSetup->RequestType == 0x2 && pSetup->Request == 1)  // EP ClearFeature(1) (очистка признака остановки)
 	{
 	   uint8_t IsPr = ProcessSetupToken_ClearFeatureEP(hpcd, pSetup);
 	   if (IsPr) return; // действительно нормально обрабатано
 	};
-	if (pSetup->RequestType == 0x2 && pSetup->Request == 0x03)  // EP SetFeature (задание признака остановки)
+	if (pSetup->RequestType == 0x2 && pSetup->Request == 3)  // EP SetFeature(2) (задание признака остановки)
 	{
 		uint8_t IsPr = ProcessSetupToken_SetFeatureEP(hpcd, pSetup);
 		if (IsPr) return; // действительно нормально обрабатано
 	};
-
-    // bRequest = bVendorCode из BOS, wValue = iLandingPage из BOS, Index = 2 (get_url)
-    //
-	if (pSetup->RequestType == 0xc0 && pSetup->Request == 0x01 && pSetup->Index == 2 && pSetup->Value == 1)  // GET_URL (0x02)
+	if (pSetup->RequestType == 0x0 && (pSetup->Request == 3 || pSetup->Request == 1))  // Set или ClearFeature устройства
 	{
-        NikyUsbDebug_GetUrlN++;
-		uint8_t * p = (uint8_t *) &MyURL_Descriptor;
-        int len = sizeof(MyURL_Descriptor);
-	    if (len > pSetup->Length) len = pSetup->Length;
-	    NikyUsbSetupTxP = p;      // буфер передачи ответа на TxSetup через IN_EP0
-	    NikyUsbSetupTxSz = len;   // и длина ответа
-	    NikyUsbStatus = 1;
-	    SetupOutOtvetProc(1);
-	    return;
+		uint8_t IsPr = ProcessSetupToken_SetClrFeatureDevice(hpcd, pSetup, pSetup->Request == 3 ? 1:0);
+		if (IsPr) return; // обрабатано
 	};
 
 
+    // bRequest = bVendorCode из BOS, wValue = iLandingPage из BOS, Index = 2 (get_url)
+    //
+	if (pSetup->RequestType == 0xc0) // 0xc0 - vendor-специфичный запрос к устройству
+	{
+		uint8_t IsPr = ProcessSetupToken_GetVendorDeviceDescriptor(hpcd, pSetup);
+		if (IsPr) return; // действительно нормально обрабатано
+	};
+
+	if ((pSetup->RequestType & 0xd0) == 0x80 && pSetup->Request == 0) // 0 - GET_STATUS
+	{
+	   uint8_t IsPr = ProcessSetupToken_GetStatus(hpcd, pSetup);
+	   if (IsPr) return; // нормально обрабатано
+    };
+
 	if (NDBG) Usart_Out(0xae);
 	HAL_PCD_EP_SetStall(hpcd, pSetup->RequestType & 0x80);  // RequestType.D7=1 - device to host (IN ENDPOINT)
-	return;
 
-    // */
-
-	OldHAL_PCD_SetupStageCallback(hpcd);
+	//OldHAL_PCD_SetupStageCallback(hpcd);
 };
 
 
@@ -1133,6 +1316,7 @@ static void EP3Midi_Send_Proc__()
 	};
 	return;
 
+	/*
 	if (len>16) len=16; // отправим максимум один пакет, который разорван границей буфера
 
 	static uint32_t g_BufExt[16] __ToCCMRAM;
@@ -1142,6 +1326,7 @@ static void EP3Midi_Send_Proc__()
 
 	m_UsbMidiOutBufPosSend = PosRd;
 	HAL_PCD_EP_Transmit(&hpcd_USB_OTG_FS, 3, (uint8_t *) (g_BufExt), ((int)len)<<2);
+	*/
 };
 #endif
 

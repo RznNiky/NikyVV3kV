@@ -49,6 +49,7 @@ extern volatile uint8_t m_UsbMidiOutBufPosSend;
 
 extern uint8_t volatile NikyUsbDebug_GetUrlN;
 extern uint8_t volatile NikyUsbDebug_GetBOSDescriptorN;
+extern uint8_t volatile NikyUsbDebug_Get_MS_OS_20_Descriptor_N;
 
 
 
